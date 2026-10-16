@@ -1,0 +1,44 @@
+name: Build APKs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unzip project
+        run: unzip -q RemoteHotspotPro.zip
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Add google-services.json
+        working-directory: RemoteHotspotPro
+        env:
+          ADMIN_JSON: ${{ secrets.ADMIN_GOOGLE_SERVICES }}
+          USER_JSON: ${{ secrets.USER_GOOGLE_SERVICES }}
+        run: |
+          printf '%s' "$ADMIN_JSON" > admin/google-services.json
+          printf '%s' "$USER_JSON" > user/google-services.json
+
+      - name: Build debug APKs
+        working-directory: RemoteHotspotPro
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: RemoteHotspotPro/*/build/outputs/apk/debug/*.apk
