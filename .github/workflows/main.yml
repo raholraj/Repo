@@ -14,6 +14,18 @@ jobs:
       - name: Unzip project
         run: unzip -q RemoteHotspotPro.zip
 
+      - name: Apply source fixes
+        working-directory: RemoteHotspotPro
+        run: |
+          # Fix 1: BluetoothSocket nullability
+          sed -i 's/val sock: BluetoothSocket = cached/val sock = cached ?: return@withLock null/' admin/src/main/java/com/remotehotspot/admin/AdminBt.kt
+          # Fix 2: ExtendedFloatingActionButton named params + contentDescription
+          sed -i 's/ExtendedFloatingActionButton({ showAdd = true }, icon = { Icon(Icons.Filled.Add, null) }, text = { Text("Add device") })/ExtendedFloatingActionButton(onClick = { showAdd = true }, icon = { Icon(Icons.Filled.Add, contentDescription = null) }, text = { Text("Add device") })/' admin/src/main/java/com/remotehotspot/admin/MainActivity.kt
+          # Fix 3: make clickNode suspend
+          sed -i 's/private fun clickNode(n: AccessibilityNodeInfo): Boolean {/private suspend fun clickNode(n: AccessibilityNodeInfo): Boolean {/' user/src/main/java/com/remotehotspot/user/HotspotAccessibilityService.kt
+          echo "Source fixes applied"
+          grep -n "val sock = cached\|ExtendedFloatingActionButton(onClick\|private suspend fun clickNode" admin/src/main/java/com/remotehotspot/admin/*.kt user/src/main/java/com/remotehotspot/user/HotspotAccessibilityService.kt || true
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -37,17 +49,9 @@ jobs:
 
       - name: Build debug APKs
         working-directory: RemoteHotspotPro
-        run: |
-          set +e
-          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee full_log.txt
-          EXIT=${PIPESTATUS[0]}
-          echo "=== COMPILE ERRORS ==="
-          grep -E "^e: |error:|Unresolved|FAILURE:|What went wrong|Compilation error" full_log.txt || true
-          echo "=== END ERRORS ==="
-          exit $EXIT
+        run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Upload APKs
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: apks
