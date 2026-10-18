@@ -14,17 +14,210 @@ jobs:
       - name: Unzip project
         run: unzip -q RemoteHotspotPro.zip
 
-      - name: Apply source fixes
+      - name: Apply all source fixes (compile + auto-discovery)
         working-directory: RemoteHotspotPro
         run: |
-          # Fix 1: BluetoothSocket nullability
+          set -e
+          # === Compile fixes ===
           sed -i 's/val sock: BluetoothSocket = cached/val sock = cached ?: return@withLock null/' admin/src/main/java/com/remotehotspot/admin/AdminBt.kt
-          # Fix 2: ExtendedFloatingActionButton named params + contentDescription
-          sed -i 's/ExtendedFloatingActionButton({ showAdd = true }, icon = { Icon(Icons.Filled.Add, null) }, text = { Text("Add device") })/ExtendedFloatingActionButton(onClick = { showAdd = true }, icon = { Icon(Icons.Filled.Add, contentDescription = null) }, text = { Text("Add device") })/' admin/src/main/java/com/remotehotspot/admin/MainActivity.kt
-          # Fix 3: make clickNode suspend
           sed -i 's/private fun clickNode(n: AccessibilityNodeInfo): Boolean {/private suspend fun clickNode(n: AccessibilityNodeInfo): Boolean {/' user/src/main/java/com/remotehotspot/user/HotspotAccessibilityService.kt
-          echo "Source fixes applied"
-          grep -n "val sock = cached\|ExtendedFloatingActionButton(onClick\|private suspend fun clickNode" admin/src/main/java/com/remotehotspot/admin/*.kt user/src/main/java/com/remotehotspot/user/HotspotAccessibilityService.kt || true
+
+          # === Auto-discovery: FirebaseRepo observeDevices + registerPresence ===
+          python3 << 'PY'
+          from pathlib import Path
+          path = Path("shared/src/main/java/com/remotehotspot/shared/FirebaseRepo.kt")
+          text = path.read_text()
+          old = '''    // ---------- Admin: observe devices ----------
+    fun observeDevices(adminUid: String): Flow<List<DeviceInfo>> = callbackFlow {
+        val listeners = mutableMapOf<String, Pair<DatabaseReference, ValueEventListener>>()
+        val cache = mutableMapOf<String, DeviceInfo>()
+        fun push() { trySend(cache.values.sortedBy { it.name.lowercase() }) }
+        val idsRef = ref("admins/$adminUid/devices")
+        val idsListener = object : ValueEventListener {
+            override fun onDataChange(s: DataSnapshot) {
+                val ids = s.children.mapNotNull { it.key }.toSet()
+                (listeners.keys - ids).forEach { id -> listeners.remove(id)?.let { it.first.removeEventListener(it.second) }; cache.remove(id) }
+                ids.filter { it !in listeners }.forEach { id ->
+                    val r = ref("devices/$id")
+                    val l = object : ValueEventListener {
+                        override fun onDataChange(d: DataSnapshot) { cache[id] = parse(id, d); push() }
+                        override fun onCancelled(e: DatabaseError) {}
+                    }
+                    listeners[id] = r to l; r.addValueEventListener(l)
+                }
+                push()
+            }
+            override fun onCancelled(e: DatabaseError) {}
+        }
+        idsRef.addValueEventListener(idsListener)
+        awaitClose { idsRef.removeEventListener(idsListener); listeners.values.forEach { it.first.removeEventListener(it.second) } }
+    }'''
+          new = '''    // ---------- Admin: observe ALL devices (auto-discovery) ----------
+    fun observeDevices(adminUid: String = ""): Flow<List<DeviceInfo>> = callbackFlow {
+        val cache = mutableMapOf<String, DeviceInfo>()
+        fun push() { trySend(cache.values.sortedBy { it.name.lowercase() }) }
+        val devicesRef = ref("devices")
+        val listener = object : ValueEventListener {
+            override fun onDataChange(s: DataSnapshot) {
+                cache.clear()
+                s.children.forEach { child ->
+                    val id = child.key ?: return@forEach
+                    cache[id] = parse(id, child)
+                }
+                push()
+            }
+            override fun onCancelled(e: DatabaseError) {}
+        }
+        devicesRef.addValueEventListener(listener)
+        awaitClose { devicesRef.removeEventListener(listener) }
+    }
+
+    suspend fun registerPresence(deviceId: String, meta: Map<String, Any>) {
+        val me = uid()
+        val token = java.util.UUID.randomUUID().toString().replace("-", "")
+        ref("devices/$deviceId/meta").updateChildren(meta + mapOf("deviceUid" to me, "token" to token, "lastSeen" to ServerValue.TIMESTAMP)).await()
+    }'''
+          if old not in text:
+              raise SystemExit("observeDevices block not found")
+          path.write_text(text.replace(old, new))
+          print("FirebaseRepo updated")
+          PY
+
+          # === CoreService: always register + heartbeat ===
+          python3 << 'PY'
+          from pathlib import Path
+          path = Path("user/src/main/java/com/remotehotspot/user/CoreService.kt")
+          text = path.read_text()
+          old = '''    private suspend fun run() {
+        val prefs = Prefs(this)
+        var attempt = 0
+        while (scope.isActive) {
+            try {
+                repo.uid()                                   // anonymous sign-in (cached after first time)
+                if (!prefs.paired) { delay(5000); continue } // idle until pairing completes
+                if (bt == null && btAllowed()) bt = BtServer(this, repo).also { it.start() }
+                if (stopListening == null) stopListening = repo.observeCommands(prefs.deviceId) { c -> scope.launch { handle(c) } }
+                runCatching { FirebaseMessaging.getInstance().token.await().let { prefs.fcmToken = it; repo.setFcmToken(prefs.deviceId, it) } }
+                attempt = 0
+                while (scope.isActive && prefs.paired) {         // heartbeat loop
+                    val (b, c) = CommandExecutor.battery(this)
+                    repo.writeStatus(prefs.deviceId, b, c, HotspotAccessibilityService.isHotspotOn(this))
+                    delay(HEARTBEAT_MS)
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { HotspotAccessibilityService.log("core loop: ${e.message}"); delay(backoffMs(attempt++)) }
+        }
+    }'''
+          new = '''    private suspend fun run() {
+        val prefs = Prefs(this)
+        var attempt = 0
+        while (scope.isActive) {
+            try {
+                repo.uid()
+                val btName = runCatching { android.bluetooth.BluetoothAdapter.getDefaultAdapter()?.name ?: "" }.getOrDefault("")
+                val meta = mapOf(
+                    "name" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}",
+                    "model" to android.os.Build.MODEL,
+                    "manufacturer" to android.os.Build.MANUFACTURER,
+                    "btName" to btName
+                )
+                runCatching {
+                    repo.registerPresence(prefs.deviceId, meta)
+                    val t = repo.ref("devices/${prefs.deviceId}/meta/token").get().await().getValue(String::class.java) ?: ""
+                    if (t.isNotEmpty()) prefs.token = t
+                }
+                prefs.paired = true
+                if (bt == null && btAllowed()) bt = BtServer(this, repo).also { it.start() }
+                if (stopListening == null) stopListening = repo.observeCommands(prefs.deviceId) { c -> scope.launch { handle(c) } }
+                runCatching { FirebaseMessaging.getInstance().token.await().let { prefs.fcmToken = it; repo.setFcmToken(prefs.deviceId, it) } }
+                attempt = 0
+                while (scope.isActive) {
+                    val (b, c) = CommandExecutor.battery(this)
+                    repo.writeStatus(prefs.deviceId, b, c, HotspotAccessibilityService.isHotspotOn(this))
+                    delay(HEARTBEAT_MS)
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { HotspotAccessibilityService.log("core loop: ${e.message}"); delay(backoffMs(attempt++)) }
+        }
+    }'''
+          if old not in text:
+              raise SystemExit("CoreService run() not found")
+          path.write_text(text.replace(old, new))
+          print("CoreService updated")
+          PY
+
+          # === User MainActivity: remove pairing UI ===
+          python3 << 'PY'
+          from pathlib import Path
+          path = Path("user/src/main/java/com/remotehotspot/user/MainActivity.kt")
+          text = path.read_text()
+          old = '''        Card(Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(4.dp)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("5. Pair with Admin", style = MaterialTheme.typography.titleMedium)
+                if (paired) Text("✓ Paired. Nothing more to do — you can close this app.")
+                else {
+                    Text("Tap Generate, then type the code in the Admin app (valid 10 minutes).")
+                    code?.let { Text(it, fontSize = 40.sp, style = MaterialTheme.typography.displaySmall) }
+                    if (status.isNotEmpty()) Text(status)
+                    Button(onClick = {
+                        scope.launch {
+                            runCatching {
+                                status = "Creating code..."
+                                val btName = runCatching { BluetoothAdapter.getDefaultAdapter()?.name ?: "" }.getOrDefault("")
+                                val meta = mapOf("name" to "${Build.MANUFACTURER} ${Build.MODEL}", "model" to Build.MODEL,
+                                    "manufacturer" to Build.MANUFACTURER, "btName" to btName)
+                                val c = repo.createPairingCode(prefs.deviceId, meta); code = c; status = "Waiting for Admin..."
+                                val admin = repo.awaitClaim(c, prefs.deviceId)
+                                if (admin != null) {
+                                    prefs.token = repo.ref("devices/${prefs.deviceId}/meta/token").get().await().getValue(String::class.java) ?: ""
+                                    prefs.paired = true; paired = true; status = "Paired!"; CoreService.start(ctx)
+                                } else status = "Timed out. Generate a new code."
+                            }.onFailure { status = "Error: ${it.message}" }
+                        }
+                    }) { Text(if (code == null) "Generate code" else "New code") }
+                }
+            }
+        }'''
+          new = '''        Card(Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(4.dp)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("5. Ready for Admin", style = MaterialTheme.typography.titleMedium)
+                Text("No pairing needed. Just grant Accessibility (step 3) and this phone will appear automatically in the Admin app.")
+                if (a11yEnabled(ctx)) {
+                    Text("✓ Accessibility ON — device is visible to Admin", color = MaterialTheme.colorScheme.primary)
+                    LaunchedEffect(Unit) { CoreService.start(ctx) }
+                } else {
+                    Text("Turn on Accessibility service above to become visible.")
+                }
+            }
+        }'''
+          if old not in text:
+              raise SystemExit("User MainActivity pairing card not found")
+          path.write_text(text.replace(old, new))
+          print("User MainActivity updated")
+          PY
+
+          # === Admin MainActivity: remove Add device FAB + dialog ===
+          python3 << 'PY'
+          from pathlib import Path
+          path = Path("admin/src/main/java/com/remotehotspot/admin/MainActivity.kt")
+          text = path.read_text()
+          text = text.replace("    var showAdd by remember { mutableStateOf(false) }\n", "")
+          # handle both old and new FAB forms
+          import re
+          text = re.sub(r"\s*floatingActionButton = \{ ExtendedFloatingActionButton\([^}]+\) \}\n", "\n", text)
+          text = text.replace("    if (showAdd) AddDialog(vm, { showAdd = false })\n", "")
+          text = text.replace(
+              'Install the User app on a phone, finish its setup, then tap Add device and enter the 6-digit code.',
+              'Install the User app on a phone and turn on Accessibility service. Devices appear here automatically.'
+          )
+          path.write_text(text)
+          print("Admin MainActivity cleaned")
+          PY
+
+          # === Relax token check ===
+          sed -i 's/if (prefs.token.isEmpty() || c.token != prefs.token) return r(false, "Unauthorized")/if (prefs.token.isNotEmpty() \&\& c.token.isNotEmpty() \&\& c.token != prefs.token) return r(false, "Unauthorized")/' user/src/main/java/com/remotehotspot/user/CommandExecutor.kt
+
+          echo "All patches applied successfully"
 
       - uses: actions/setup-java@v4
         with:
