@@ -34,14 +34,20 @@ jobs:
         run: |
           cp google-services.json RemoteHotspotPro/admin/google-services.json
           cp google-services.json RemoteHotspotPro/user/google-services.json
-          echo "Copied google-services.json to both modules"
 
       - name: Build debug APKs
         working-directory: RemoteHotspotPro
         run: |
-          gradle assembleDebug --no-daemon --stacktrace
+          set +e
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee full_log.txt
+          EXIT=${PIPESTATUS[0]}
+          echo "=== COMPILE ERRORS ==="
+          grep -E "^e: |error:|Unresolved|FAILURE:|What went wrong|Compilation error" full_log.txt || true
+          echo "=== END ERRORS ==="
+          exit $EXIT
 
       - name: Upload APKs
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: apks
