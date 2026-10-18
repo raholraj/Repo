@@ -26,62 +26,10 @@ jobs:
           gradle-version: 8.7
 
       - name: Add google-services.json
-        working-directory: RemoteHotspotPro
         run: |
-          cat > admin/google-services.json << 'EOF'
-{
-  "project_info": {
-    "project_number": "419365380841",
-    "firebase_url": "https://hotsport-b45e4-default-rtdb.firebaseio.com",
-    "project_id": "hotsport-b45e4",
-    "storage_bucket": "hotsport-b45e4.firebasestorage.app"
-  },
-  "client": [
-    {
-      "client_info": {
-        "mobilesdk_app_id": "1:419365380841:android:ff3c761f378d0553c24678",
-        "android_client_info": {
-          "package_name": "com.remotehotspot.admin"
-        }
-      },
-      "oauth_client": [],
-      "api_key": [
-        {
-          "current_key": "AIzaSyDJyGMdH6T1zrXo5b3tKAv9ml73MoMtBr8"
-        }
-      ],
-      "services": {
-        "appinvite_service": {
-          "other_platform_oauth_client": []
-        }
-      }
-    },
-    {
-      "client_info": {
-        "mobilesdk_app_id": "1:419365380841:android:3d9dc827bd05cb46c24678",
-        "android_client_info": {
-          "package_name": "com.remotehotspot.user"
-        }
-      },
-      "oauth_client": [],
-      "api_key": [
-        {
-          "current_key": "AIzaSyDJyGMdH6T1zrXo5b3tKAv9ml73MoMtBr8"
-        }
-      ],
-      "services": {
-        "appinvite_service": {
-          "other_platform_oauth_client": []
-        }
-      }
-    }
-  ],
-  "configuration_version": "1"
-}
-EOF
-          cp admin/google-services.json user/google-services.json
-          echo "google-services.json created successfully"
-          cat admin/google-services.json | head -5
+          cp google-services.json RemoteHotspotPro/admin/google-services.json
+          cp google-services.json RemoteHotspotPro/user/google-services.json
+          echo "Copied google-services.json to both modules"
 
       - name: Build debug APKs
         working-directory: RemoteHotspotPro
