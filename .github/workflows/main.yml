@@ -11,68 +11,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Unzip project
-        run: unzip -q RemoteHotspotPro.zip
-
-      - name: Apply patches and auto-discovery
-        working-directory: RemoteHotspotPro
-        run: |
-          set -e
-          # Compile fixes from patches
-          cp ../patches/AdminBt.kt admin/src/main/java/com/remotehotspot/admin/AdminBt.kt
-          cp ../patches/CommandExecutor.kt user/src/main/java/com/remotehotspot/user/CommandExecutor.kt
-          sed -i 's/private fun clickNode(n: AccessibilityNodeInfo): Boolean {/private suspend fun clickNode(n: AccessibilityNodeInfo): Boolean {/' user/src/main/java/com/remotehotspot/user/HotspotAccessibilityService.kt
-
-          # Auto-discovery: make observeDevices watch ALL devices
-          python3 -c "
-          from pathlib import Path
-          p = Path('shared/src/main/java/com/remotehotspot/shared/FirebaseRepo.kt')
-          t = p.read_text()
-          t = t.replace('val idsRef = ref(\"admins/\$adminUid/devices\")', 'val idsRef = ref(\"devices\")')
-          # Change the listener logic to treat all children as device ids
-          old = '''val ids = s.children.mapNotNull { it.key }.toSet()
-                (listeners.keys - ids).forEach { id -> listeners.remove(id)?.let { it.first.removeEventListener(it.second) }; cache.remove(id) }
-                ids.filter { it !in listeners }.forEach { id ->
-                    val r = ref(\"devices/\$id\")
-                    val l = object : ValueEventListener {
-                        override fun onDataChange(d: DataSnapshot) { cache[id] = parse(id, d); push() }
-                        override fun onCancelled(e: DatabaseError) {}
-                    }
-                    listeners[id] = r to l; r.addValueEventListener(l)
-                }
-                push()'''
-          new = '''val ids = s.children.mapNotNull { it.key }.toSet()
-                (listeners.keys - ids).forEach { id -> listeners.remove(id)?.let { it.first.removeEventListener(it.second) }; cache.remove(id) }
-                ids.filter { it !in listeners }.forEach { id ->
-                    val r = ref(\"devices/\$id\")
-                    val l = object : ValueEventListener {
-                        override fun onDataChange(d: DataSnapshot) { cache[id] = parse(id, d); push() }
-                        override fun onCancelled(e: DatabaseError) {}
-                    }
-                    listeners[id] = r to l; r.addValueEventListener(l)
-                }
-                push()'''
-          # Just changing the path is enough for auto-discovery of all devices
-          p.write_text(t)
-          print('observeDevices now watches all devices')
-          "
-
-          # CoreService: remove paired gate so it always registers
-          sed -i 's/if (!prefs.paired) { delay(5000); continue }/\/\/ auto-discovery: always continue/' user/src/main/java/com/remotehotspot/user/CoreService.kt
-          sed -i 's/while (scope.isActive \&\& prefs.paired)/while (scope.isActive)/' user/src/main/java/com/remotehotspot/user/CoreService.kt
-
-          # Force mark paired after uid so heartbeat runs
-          sed -i 's/repo.uid()                                   \/\/ anonymous sign-in (cached after first time)/repo.uid()\n                prefs.paired = true/' user/src/main/java/com/remotehotspot/user/CoreService.kt
-
-          # User UI: change step 5 text to say auto
-          sed -i 's/5. Pair with Admin/5. Ready for Admin/' user/src/main/java/com/remotehotspot/user/MainActivity.kt
-          sed -i 's/Tap Generate, then type the code in the Admin app (valid 10 minutes)./No pairing needed. Accessibility ON = visible in Admin app./' user/src/main/java/com/remotehotspot/user/MainActivity.kt || true
-
-          # Admin empty state text
-          sed -i 's/finish its setup, then tap Add device and enter the 6-digit code./and turn on Accessibility. Devices appear here automatically./' admin/src/main/java/com/remotehotspot/admin/MainActivity.kt
-
-          echo 'All auto-discovery patches applied'
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -88,11 +26,6 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
-
-      - name: Add google-services.json
-        run: |
-          cp google-services.json RemoteHotspotPro/admin/google-services.json
-          cp google-services.json RemoteHotspotPro/user/google-services.json
 
       - name: Build debug APKs
         working-directory: RemoteHotspotPro
