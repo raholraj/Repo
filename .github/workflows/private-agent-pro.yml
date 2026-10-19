@@ -1,0 +1,74 @@
+name: Build PrivateAgentPro APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'PrivateAgentPro/**'
+      - 'PrivateAgentPro.zip'
+      - '.github/workflows/private-agent-pro.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack source
+        run: |
+          if [ -f PrivateAgentPro.zip ]; then
+            unzip -qo PrivateAgentPro.zip
+            # handle nested folder
+            if [ -d PrivateAgentPro/PrivateAgentPro ]; then
+              mv PrivateAgentPro/PrivateAgentPro PrivateAgentPro_src
+              rm -rf PrivateAgentPro
+              mv PrivateAgentPro_src PrivateAgentPro
+            fi
+          fi
+          if [ ! -f PrivateAgentPro/pubspec.yaml ]; then
+            echo "ERROR: Put PrivateAgentPro.zip (or PrivateAgentPro/ folder) in the repo root"
+            ls -la
+            exit 1
+          fi
+          echo "Source ready:"
+          ls PrivateAgentPro | head
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        working-directory: PrivateAgentPro
+        run: |
+          # Relax SDK if needed for CI Flutter version
+          sed -i 's/sdk: \^3\.10\.3/sdk: ">=3.5.0 <4.0.0"/' pubspec.yaml || true
+          sed -i 's/flutter_lints: \^6\.0\.0/flutter_lints: ^5.0.0/' pubspec.yaml || true
+          flutter pub get
+
+      - name: Build debug APK
+        working-directory: PrivateAgentPro
+        run: flutter build apk --debug
+
+      - name: Collect artifact
+        run: |
+          mkdir -p dist
+          APK=$(find PrivateAgentPro/build/app/outputs -name '*.apk' | head -1)
+          echo "Found: $APK"
+          cp "$APK" dist/PrivateAgentPro-debug.apk
+          ls -lh dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PrivateAgentPro-apk
+          path: dist/*.apk
+          if-no-files-found: error
