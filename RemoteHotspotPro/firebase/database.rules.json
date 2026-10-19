@@ -1,0 +1,40 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "config": { ".read": false, ".write": false },
+    "adminSessions": {
+      "$uid": {
+        ".read": false,
+        ".write": "auth != null && auth.uid === $uid && newData.val() === root.child('config/adminKey').val()"
+      }
+    },
+    "devices": {
+      ".read": "auth != null && root.child('adminSessions/' + auth.uid).exists()",
+      "$id": {
+        "meta": {
+          ".write": "auth != null && (!data.exists() || data.child('deviceUid').val() === auth.uid)",
+          ".validate": "newData.child('deviceUid').val() === auth.uid"
+        },
+        "status": {
+          ".write": "auth != null && root.child('devices/' + $id + '/meta/deviceUid').val() === auth.uid"
+        }
+      }
+    },
+    "commands": {
+      "$id": {
+        ".read": "auth != null && root.child('devices/' + $id + '/meta/deviceUid').val() === auth.uid",
+        "$cmdId": {
+          ".write": "auth != null && (root.child('adminSessions/' + auth.uid).exists() || root.child('devices/' + $id + '/meta/deviceUid').val() === auth.uid)",
+          ".validate": "newData.hasChildren(['cmd','ts'])"
+        }
+      }
+    },
+    "commandResults": {
+      "$id": {
+        ".read": "auth != null && root.child('adminSessions/' + auth.uid).exists()",
+        ".write": "auth != null && root.child('devices/' + $id + '/meta/deviceUid').val() === auth.uid"
+      }
+    }
+  }
+}
